@@ -18,8 +18,13 @@
  *
  *  Version history
 */
-public static String version() { return "v0.3.10e.20190628" }
+public static String version() { return "v0.3.113.20210203" }
 /*
+ *	02/03/2021 >>> v0.3.113.20210203 - BETA M3 - Fixed GET, HEAD, DELETE web requests that used Send Variables (broken in 0.3.112)
+ *	02/02/2021 >>> v0.3.112.20210202 - BETA M3 - Fixed FORM type web requests that used Send Variables (broken in 0.3.111), improved a few confusing log messages
+ *	01/30/2021 >>> v0.3.111.20210130 - BETA M3 - Numerous bug fixes, performance improvements for HTTP, *CLEAR index to reset list variables, reset access token
+ *	10/09/2019 >>> v0.3.110.20191009 - BETA M3 - Load devices into dashboard in multiple batches when necessary, switch to FontAwesome Kit to always use latest version
+ *	08/22/2019 >>> v0.3.10f.20190822 - BETA M3 - Custom headers on web requests by @Bloodtick_Jones (write as JSON in Authorization header field), capabilities split into three pages to fix device selection errors
  *	06/28/2019 >>> v0.3.10e.20190628 - BETA M3 - Reinstated dirty fix for dashboard timeouts after reports of increased error rates, NaN device status is back
  *	06/27/2019 >>> v0.3.10d.20190627 - BETA M3 - Reverted attempted fix for dashboard timeouts, fixes NaN device status on piston editing, dashboard tweaks for Hubitat by E_Sch
  *	05/22/2019 >>> v0.3.10c.20190522 - BETA M3 - Changed the device selection page in main app to fix timeout issues in Asia-Pacific
@@ -621,7 +626,8 @@ Map pause() {
     if (rtData.logging) info "Stopping piston...", rtData, 0
     checkVersion(rtData)
     state.schedules = []
-    rtData.stats.nextSchedule = 0
+    rtData.stats.nextSchedule = 0L
+    state.nextSchedule = 0L
     unsubscribe()
     unschedule()
     app.updateSetting('dev', null)
@@ -712,7 +718,7 @@ private getRunTimeData(rtData = null, semaphore = null, fetchWrappers = false) {
 	    rtData.id = appId
 		rtData.active = state.active;
         rtData.category = state.category;
-	    rtData.stats = [nextScheduled: 0]
+	    rtData.stats = [nextSchedule: 0L]
 	    //we're reading the cache from atomicState because we might have waited at a semaphore
 	    rtData.cache = atomicState.cache ?: [:]
 	    rtData.newCache = [:]
@@ -1138,24 +1144,29 @@ private processSchedules(rtData, scheduleJob = false) {
         }
     }*/
     if (scheduleJob) {
+        Long nextT=0L
         if (schedules.size()) {
-    		def next = schedules.sort{ it.t }[0]
-        	def t = (next.t - now()) / 1000
-        	t = (t < 1 ? 1 : t)
-        	rtData.stats.nextSchedule = next.t
-        	if (rtData.logging) info "Setting up scheduled job for ${formatLocalTime(next.t)} (in ${t}s)" + (schedules.size() > 1 ? ', with ' + (schedules.size() - 1).toString() + ' more job' + (schedules.size() > 2 ? 's' : '') + ' pending' : ''), rtData
-        	runIn(t, timeHandler, [data: next])
-        	//runIn(t + 30, timeRecoveryHandler, [data: next])
-    	} else {
-	    	rtData.stats.nextSchedule = 0
+    		def tnext = schedules.sort{ it.t }[0]
+		nextT=(Long)tnext.t
+        	Long t = (nextT - now()) / 1000
+        	t = (t < 1L ? 1L : t)
+        	if (rtData.logging) info "Setting up scheduled job for ${formatLocalTime(nextT)} (in ${t}s)" + (schedules.size() > 1 ? ', with ' + (schedules.size() - 1).toString() + ' more job' + (schedules.size() > 2 ? 's' : '') + ' pending' : ''), rtData
+		Integer t1=Math.round(t)
+        	runIn(t1, timeHandler, [data: tnext])
+        	//runIn(t + 30, timeRecoveryHandler, [data: tnext])
+    	}
+    	if(nextT==0L && (Long)state.nextSchedule!=0L){
+                unschedule(timeHandler)
             //remove the recovery
     		//unschedule(timeRecoveryHandler)
-	    }
+	}
+        	rtData.stats.nextSchedule = nextT
+	state.nextSchedule=nextT
     }
     if (rtData.piston.o?.pep) atomicState.schedules = schedules
     state.schedules = schedules
-    state.schedules = schedules
-    state.nextSchedule = rtData.stats.nextSchedule
+    //state.schedules = schedules
+    //state.nextSchedule = rtData.stats.nextSchedule
     rtData.schedules = []
 }
 
@@ -1365,12 +1376,14 @@ private Boolean executeStatement(rtData, statement, async = false) {
                     double endValue = 0
                     double stepValue = 1
                     if (statement.t == 'each') {
-                        devices = evaluateOperand(rtData, null, statement.lo).v ?: []
+                        def t0 = evaluateOperand(rtData, null, statement.lo).v
+                        devices = t0 ?: []
                         endValue = devices.size() - 1
                     } else {
                     	startValue = evaluateScalarOperand(rtData, statement, statement.lo, null, 'decimal').v
                     	endValue = evaluateScalarOperand(rtData, statement, statement.lo2, null, 'decimal').v
-                    	stepValue = evaluateScalarOperand(rtData, statement, statement.lo3, null, 'decimal').v ?: 1.0
+                    	Double t0 = evaluateScalarOperand(rtData, statement, statement.lo3, null, 'decimal').v
+                    	stepValue = t0 ?: 1.0
                     }
                     String counterVariable = getVariable(rtData, statement.x).t != 'error' ? statement.x : null
                     if (((startValue <= endValue) && (stepValue > 0)) || ((startValue >= endValue) && (stepValue < 0)) || !!rtData.fastForwardTo) {
@@ -1381,8 +1394,8 @@ private Boolean executeStatement(rtData, statement, async = false) {
 	                        rtData.cache["f:${statement.$}"] = index
                         }
                         setSystemVariableValue(rtData, '$index', index)
-						if ((statement.t == 'each') && !rtData.fastForward) setSystemVariableValue(rtData, '$device', (index < devices.size() ? [devices[(int) index]] : []))
-                        if (counterVariable && !rtData.fastForward) setVariable(rtData, counterVariable, (statement.t == 'each') ? (index < devices.size() ? [devices[(int) index]] : []) : index)
+						if ((statement.t == 'each') && !rtData.fastForwardTo) setSystemVariableValue(rtData, '$device', (index < devices.size() ? [devices[(int) index]] : []))
+                        if (counterVariable && !rtData.fastForwardTo) setVariable(rtData, counterVariable, (statement.t == 'each') ? (index < devices.size() ? [devices[(int) index]] : []) : index)
                         //do the loop
                         perform = executeStatements(rtData, statement.s, async)
                         if (!perform) {
@@ -1400,8 +1413,8 @@ private Boolean executeStatement(rtData, statement, async = false) {
                         if (!!rtData.fastForwardTo) break
                         index = index + stepValue
                         setSystemVariableValue(rtData, '$index', index)
-						if ((statement.t == 'each') && !rtData.fastForward) setSystemVariableValue(rtData, '$device', (index < devices.size() ? [devices[(int) index]] : []))
-                        if (counterVariable && !rtData.fastForward) setVariable(rtData, counterVariable, (statement.t == 'each') ? (index < devices.size() ? [devices[(int) index]] : []) : index)
+						if ((statement.t == 'each') && !rtData.fastForwardTo) setSystemVariableValue(rtData, '$device', (index < devices.size() ? [devices[(int) index]] : []))
+                        if (counterVariable && !rtData.fastForwardTo) setVariable(rtData, counterVariable, (statement.t == 'each') ? (index < devices.size() ? [devices[(int) index]] : []) : index)
                         rtData.cache["f:${statement.$}"] = index
                         if (((stepValue > 0 ) && (index > endValue)) || ((stepValue < 0 ) && (index < endValue))) {
                         	perform = false
@@ -1499,7 +1512,9 @@ private Boolean executeStatement(rtData, statement, async = false) {
         }
     }
 	if (!rtData.fastForwardTo) {
-    	def schedule = (statement.t == 'every') ? (rtData.schedules.find{ it.s == statement.$} ?: state.schedules.find{ it.s == statement.$ }) : null
+    	Boolean tt0 = (String)statement.t == 'every'
+    	def t0 = tt0 ? rtData.schedules.find{ it.s == statement.$} : null
+    	def schedule = tt0 ? (t0!=null ? t0 : state.schedules.find{ it.s == statement.$ }) : null
         if (schedule) {
         	//timers need to show the remaining time
     		tracePoint(rtData, "s:${statement.$}", now() - t, now() - schedule.t)
@@ -1617,7 +1632,7 @@ private Boolean executeTask(rtData, devices, statement, task, async) {
     	def p
     	switch (param.vt) {
         	case 'variable':
-            	p = param.x instanceof List ? param.x : (param.x + (param.xi != null ? '[' + param.xi + ']' : ''));
+                if (param.t == 'x') p = param.x instanceof List ? param.x : (param.x + (param.xi != null ? '[' + param.xi + ']' : ''));
                 break;
             default:
             	def v = evaluateOperand(rtData, null, param)
@@ -3253,6 +3268,9 @@ private long vcmd_httpRequest(rtData, device, params) {
 			data[variable] = getVariable(rtData, variable).v
 		}
     }
+    if (!useQueryString && requestContentType == 'application/x-www-form-urlencoded' && data instanceof Map) {
+        data = data.collect{ k,v -> "${encodeURIComponent(k)}=${encodeURIComponent(v)}" }.join('&')
+    }
 	if (internal) {
 		try {
 			if (rtData.logging > 2) debug "Sending internal web request to: $userPart$uri", rtData
@@ -3264,7 +3282,7 @@ private long vcmd_httpRequest(rtData, device, params) {
 				headers: [
 					HOST: userPart + ip,
 					'Content-Type': requestContentType
-				] + (auth ? [Authorization: auth] : [:]),
+				] + (auth ? ((auth.startsWith('{') && auth.endsWith('}')) ? ( new groovy.json.JsonSlurper().parseText( auth ) ) : [Authorization : auth]) : [:]),
 				query: useQueryString ? data : null, //thank you @destructure00
 				body: !useQueryString ? data : null //thank you @destructure00
 			]
@@ -3279,59 +3297,32 @@ private long vcmd_httpRequest(rtData, device, params) {
 			def requestParams = [
 				uri:  "${protocol}://${userPart}${uri}",
 				query: useQueryString ? data : null,
-                headers: (auth ? [Authorization: auth] : [:]),
+				headers: (auth ? ((auth.startsWith('{') && auth.endsWith('}')) ? ( new groovy.json.JsonSlurper().parseText( auth ) ) : [Authorization : auth]) : [:]),
 				requestContentType: requestContentType,
 				body: !useQueryString ? data : null
 			]
 			def func = ""
 			switch(method) {
 				case "GET":
-					func = "httpGet"
+					func = "get"
 					break
 				case "POST":
-					func = "httpPost"
+					func = "post"
 					break
 				case "PUT":
-					func = "httpPut"
+					func = "put"
 					break
 				case "DELETE":
-					func = "httpDelete"
+					func = "delete"
 					break
 				case "HEAD":
-					func = "httpHead"
+					func = "head"
 					break
 			}
 			if (func) {
-				"$func"(requestParams) { response ->
-					setSystemVariableValue(rtData, "\$httpContentType", response.contentType)
-					setSystemVariableValue(rtData, "\$httpStatusCode", response.status)
-					setSystemVariableValue(rtData, "\$httpStatusOk", (response.status >= 200) && (response.status <= 299))
-                    def binary = false
-                    def mediaType = response.contentType.toLowerCase()
-                    switch (mediaType) {
-                    	case 'image/jpeg':
-                    	case 'image/png':
-                    	case 'image/gif':
-                        	binary = true
-                    }
-					if ((response.status == 200) && response.data && !binary) {
-						try {
-							rtData.response = response.data instanceof Map ? response.data : (LinkedHashMap) new groovy.json.JsonSlurper().parseText(response.data)
-						} catch (all) {
-                        	rtData.response = response.data
-						}
-					} else {
-                    	rtData.response = null
-                        if (response.data && (response.data instanceof java.io.ByteArrayInputStream)) {
-	                        rtData.mediaType = mediaType
-    	                    rtData.mediaData = response.data.getBytes()
-                        } else {
-	                        rtData.mediaType = null
-    	                    rtData.mediaData = null
-                        }
-                        rtData.mediaUrl = null;
-                    }
-				}
+    //if (asynchttp_v1) asynchttp_v1.put(asyncHttpRequestHandler, requestParams, [command: 'storeMedia'])
+				asynchttp_v1."$func"(ahttpRequestHandler, requestParams, [command: 'httpRequest'])
+				return 24000
 			}
 		} catch (all) {
 			error "Error executing external web request: ", rtData, null, all
@@ -3340,6 +3331,50 @@ private long vcmd_httpRequest(rtData, device, params) {
 	return 0
 }
 
+public void ahttpRequestHandler(response, callbackData){
+	def data
+	def json
+	Map setRtData=[mediaData:null, mediaType:null, mediaUrl:null] as Map
+	String callBackC=(String)callbackData?.command
+	def responseCode = response.status
+	String mediaType = ""
+	if(responseCode == 204) {
+	}else if(responseCode >= 200 && responseCode < 300 && response.data ){ 
+		Boolean binary = false
+		def t0=response.getHeaders()
+		String t1=t0 && t0."Content-Type" ? t0."Content-Type":(String)null
+		mediaType=t1 ? (String)(t1.toLowerCase()?.tokenize(';')[0]):(String)null
+		switch (mediaType) {
+			case 'image/jpeg':
+			case 'image/png':
+			case 'image/gif':
+			binary = true
+		}
+		if(!binary) {
+			data = response.data
+			if (data && data instanceof Map ) {
+			} else {
+				try{
+					data=(LinkedHashMap) new groovy.json.JsonSlurper().parseText(response.data)
+				} catch (all){
+					data=response.data
+				}
+			}
+		} else {
+			if(response.data && response.data instanceof java.io.ByteArrayInputStream){
+				setRtData.mediaType=mediaType
+				setRtData.mediaData=response.data.getBytes()
+			}
+		}
+	}
+	if (response.hasError()) {
+		String msg =  "Status $response.status raw response: $response.errorData,  error on response: $response.errorMessage"
+		error "Error executing external web request: "+msg, [:]
+		if(!responseCode) responseCode=500
+	}
+
+	handleEvents([date: new Date(), device: location, name: 'wc_async_reply', value: 'httpRequest', contentType: mediaType, responseData: data, jsonData: json, responseCode: responseCode, setRtData: setRtData])
+}
 
 private long vcmd_writeToFuelStream(rtData, device, params) {
 	def canister = params[0]
@@ -3821,7 +3856,6 @@ private Boolean evaluateCondition(rtData, condition, collection, async) {
                 if (lo) for (value in lo.values) updateCache(rtData, value)
                 if (ro) for (value in ro.values) updateCache(rtData, value)
                 if (ro2) for (value in ro2.values) updateCache(rtData, value)
-                if (rtData.fastForwardTo == null) tracePoint(rtData, "c:${condition.$}", now() - t, result)
                 if (lo.operand.dm && options.devices) setVariable(rtData, lo.operand.dm, options.devices?.matched ?: [])
                 if (lo.operand.dn && options.devices) setVariable(rtData, lo.operand.dn, options.devices?.unmatched ?: [])
                 //do the stay logic here
@@ -3874,6 +3908,7 @@ private Boolean evaluateCondition(rtData, condition, collection, async) {
                 result = oldResult
             }
         }
+        if (rtData.fastForwardTo == null) tracePoint(rtData, "c:${condition.$}", now() - t, result)
     }
     rtData.wakingUp = false
     rtData.conditionStateChanged = oldResult != result
@@ -4158,9 +4193,9 @@ private boolean comp_executes						(rtData, lv, rv = null, rv2 = null, tv = null
 private boolean comp_arrives						(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return (rtData.event.name == 'email') && match(rtData.event?.jsonData?.from ?: '', evaluateExpression(rtData, rv.v, 'string').v) && match(rtData.event?.jsonData?.message ?: '', evaluateExpression(rtData, rv2.v, 'string').v) }
 private boolean comp_happens_daily_at				(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return rtData.wakingUp }
 
-private boolean comp_changes						(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return valueCacheChanged(rtData, lv) && matchDeviceInteraction(lv.p, rtData.currentEvent.physical); }
-private boolean comp_changes_to						(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return valueCacheChanged(rtData, lv) && ("${lv.v.v}" == "${rv.v.v}") && matchDeviceInteraction(lv.p, rtData.currentEvent.physical); }
-private boolean comp_changes_away_from				(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { def oldValue = valueCacheChanged(rtData, lv); return oldValue && ("${oldValue.v.v}" == "${rv.v.v}") && matchDeviceInteraction(lv.p, rtData.currentEvent.physical); }
+private boolean comp_changes						(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return valueCacheChanged(rtData, lv) && matchDeviceInteraction(lv.v.p, rtData.currentEvent.physical); }
+private boolean comp_changes_to						(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return valueCacheChanged(rtData, lv) && ("${lv.v.v}" == "${rv.v.v}") && matchDeviceInteraction(lv.v.p, rtData.currentEvent.physical); }
+private boolean comp_changes_away_from				(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { def oldValue = valueCacheChanged(rtData, lv); return oldValue && ("${oldValue.v.v}" == "${rv.v.v}") && matchDeviceInteraction(lv.v.p, rtData.currentEvent.physical); }
 private boolean comp_drops							(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { def oldValue = valueCacheChanged(rtData, lv); return oldValue && (cast(rtData, oldValue.v.v, 'decimal') > cast(rtData, lv.v.v, 'decimal')); }
 private boolean comp_does_not_drop					(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return !comp_drops(rtData, lv, rv, rv2, tv, tv2); }
 private boolean comp_drops_below					(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { def oldValue = valueCacheChanged(rtData, lv); return oldValue && (cast(rtData, oldValue.v.v, 'decimal') >= cast(rtData, rv.v.v, 'decimal')) && (cast(rtData, lv.v.v, 'decimal') < cast(rtData, rv.v.v, 'decimal')); }
@@ -4182,8 +4217,8 @@ private boolean comp_becomes_odd					(rtData, lv, rv = null, rv2 = null, tv = nu
 private boolean comp_remains_even					(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { def oldValue = valueCacheChanged(rtData, lv); return oldValue && (cast(rtData, oldValue.v.v, 'integer').mod(2) == 0) && (cast(rtData, lv.v.v, 'integer').mod(2) == 0); }
 private boolean comp_remains_odd					(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { def oldValue = valueCacheChanged(rtData, lv); return oldValue && (cast(rtData, oldValue.v.v, 'integer').mod(2) != 0) && (cast(rtData, lv.v.v, 'integer').mod(2) != 0); }
 
-private boolean comp_changes_to_any_of				(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return !!valueCacheChanged(rtData, lv) && comp_is_any_of(rtData, lv, rv, rv2, tv, tv2) && matchDeviceInteraction(lv.p, rtData.currentEvent.physical); }
-private boolean comp_changes_away_from_any_of		(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { def oldValue = valueCacheChanged(rtData, lv); return !!oldValue && comp_is_any_of(rtData, oldValue, rv, rv2) && matchDeviceInteraction(lv.p, rtData.currentEvent.physical); }
+private boolean comp_changes_to_any_of				(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return !!valueCacheChanged(rtData, lv) && comp_is_any_of(rtData, lv, rv, rv2, tv, tv2) && matchDeviceInteraction(lv.v.p, rtData.currentEvent.physical); }
+private boolean comp_changes_away_from_any_of		(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { def oldValue = valueCacheChanged(rtData, lv); return !!oldValue && comp_is_any_of(rtData, oldValue, rv, rv2) && matchDeviceInteraction(lv.v.p, rtData.currentEvent.physical); }
 
 private boolean comp_stays							(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return comp_is(rtData, lv, rv, rv2, tv, tv2); }
 private boolean comp_stays_unchanged				(rtData, lv, rv = null, rv2 = null, tv = null, tv2 = null) { return true; }
@@ -5160,12 +5195,16 @@ private Map setVariable(rtData, name, value) {
             if (variable.t.endsWith(']')) {
             	//we're dealing with a list
                 variable.v = (variable.v instanceof Map) ? variable.v : [:]
-                Map indirectVar = getVariable(rtData, var.index)
-                //indirect variable addressing
-                if (indirectVar && (indirectVar.t != 'error')) {
-                    var.index = cast(rtData, indirectVar.v, 'string', indirectVar.t)
+                if (var.index == "*CLEAR")	{
+                    variable.v.clear()
+                } else {
+                    Map indirectVar = getVariable(rtData, var.index)
+                    //indirect variable addressing
+                    if (indirectVar && (indirectVar.t != 'error')) {
+                        var.index = cast(rtData, indirectVar.v, 'string', indirectVar.t)
+                    }
+                    variable.v[var.index] = cast(rtData, value, variable.t.replace('[]', ''))
                 }
-                variable.v[var.index] = cast(rtData, value, variable.t.replace('[]', ''))
             } else {
             	variable.v = cast(rtData, value, variable.t)
             }
@@ -5185,7 +5224,8 @@ private Map setVariable(rtData, name, value) {
 def setLocalVariable(name, value) {
 	name = sanitizeVariableName(name)
     if (!name || name.startsWith('@')) return
-	def vars = atomicState.vars ?: [:]
+	def t0 = atomicState.vars
+	def vars = t0!=null ? t0 : [:]
     vars[name] = value
     atomicState.vars = vars
     return vars
@@ -7223,11 +7263,8 @@ private func_urlencode(rtData, params) {
 	if (!params || !(params instanceof List) || (params.size() != 1)) {
     	return [t: "error", v: "Invalid parameters. Expecting urlencode(value])"];
     }
-    // URLEncoder converts spaces to + which is then indistinguishable from any 
-    // actual + characters in the value. Match encodeURIComponent in ECMAScript
-    // which encodes "a+b c" as "a+b%20c" rather than URLEncoder's "a+b+c"
-    def value = (evaluateExpression(rtData, params[0], 'string').v ?: '').replaceAll('\\+', '__wc_plus__')
-    return [t: 'string', v: URLEncoder.encode(value, 'UTF-8').replaceAll('\\+', '%20').replaceAll('__wc_plus__', '+')]
+    def value = (evaluateExpression(rtData, params[0], 'string').v ?: '')
+    return [t: 'string', v: encodeURIComponent(value)]
 }
 private func_encodeuricomponent(rtData, params) { return func_urlencode(rtData, params); }
 
@@ -7246,6 +7283,16 @@ def mem(showBytes = true) {
 /*** UTILITIES																***/
 /***																		***/
 /******************************************************************************/
+
+def encodeURIComponent(value) {
+    // URLEncoder converts spaces to + which is then indistinguishable from any 
+    // actual + characters in the value. Match encodeURIComponent in ECMAScript
+    // which encodes "a+b c" as "a+b%20c" rather than URLEncoder's "a+b+c"
+    return URLEncoder.encode(
+        "${value}".toString().replaceAll('\\+', '__wc_plus__'), 
+        'UTF-8'
+    ).replaceAll('\\+', '%20').replaceAll('__wc_plus__', '+')
+}
 
 def String md5(String md5) {
    try {
@@ -7695,7 +7742,7 @@ private List hexToRgbArray(hex) {
 /******************************************************************************/
 /*** DEBUG FUNCTIONS														***/
 /******************************************************************************/
-private log(message, rtData = null, shift = null, err = null, cmd = null, force = false) {
+private Map log(message, rtData = null, shift = null, err = null, cmd = null, force = false) {
     if (cmd == "timer") {
     	return [m: message, t: now(), s: shift, e: err]
     }
@@ -7761,12 +7808,12 @@ private log(message, rtData = null, shift = null, err = null, cmd = null, force 
 		log."$cmd" "$prefix $message", err
     }
 }
-private info(message, rtData = null, shift = null, err = null) { log message, rtData, shift, err, 'info' }
-private trace(message, rtData = null, shift = null, err = null) { log message, rtData, shift, err, 'trace' }
-private debug(message, rtData = null, shift = null, err = null) { log message, rtData, shift, err, 'debug' }
-private warn(message, rtData = null, shift = null, err = null) { log message, rtData, shift, err, 'warn' }
-private error(message, rtData = null, shift = null, err = null) { log message, rtData, shift, err, 'error' }
-private timer(message, rtData = null, shift = null, err = null) { log message, rtData, shift, err, 'timer' }
+private void info(message, rtData = null, shift = null, err = null) { def a=log message, rtData, shift, err, 'info' }
+private void trace(message, rtData = null, shift = null, err = null) { def a=log message, rtData, shift, err, 'trace' }
+private void debug(message, rtData = null, shift = null, err = null) { def a=log message, rtData, shift, err, 'debug' }
+private void warn(message, rtData = null, shift = null, err = null) { def a=log message, rtData, shift, err, 'warn' }
+private void error(message, rtData = null, shift = null, err = null) { def a=log message, rtData, shift, err, 'error' }
+private Map timer(message, rtData = null, shift = null, err = null) { log message, rtData, shift, err, 'timer' }
 
 private tracePoint(rtData, objectId, duration, value) {
 	if (objectId && rtData && rtData.trace) {

@@ -51,12 +51,12 @@ app.directive('ngWheel', ['$parse', function($parse) {
 
 
 app.directive('refresh',['$interval', function($interval){
-		var refreshTime_=0;
-		var onRefresh_=null;
-		var iv_=null;
 		return {
 			restrict:'A',
 			link:function(scope,elem,attrs){
+				var refreshTime_=0;
+				var onRefresh_=null;
+				var iv_=null;
 				elem.on('$destroy', function(){
     	            if (iv_!=null) $interval.cancel(iv_);
 				});
@@ -64,7 +64,8 @@ app.directive('refresh',['$interval', function($interval){
 					refreshTime_=attrs.refresh;
 				if(angular.isDefined(attrs.onRefresh) && angular.isFunction(scope[attrs.onRefresh])){
 					onRefresh_=scope[attrs.onRefresh];
-					iv_=$interval(function() { onRefresh_(elem[0]) },refreshTime_ * 1000);
+					if(refreshTime_>0)
+						iv_=$interval(function() { onRefresh_(elem[0]); console.log('refresh', elem[0]) },refreshTime_ * 1000);
 					attrs.$observe('refresh',function(new_iv){
 						if(!angular.equals(new_iv,refreshTime_)){
 							if(iv_!=null) $interval.cancel(iv_);
@@ -483,11 +484,6 @@ var config = app.config(['$routeProvider', '$locationProvider', '$sceDelegatePro
         controller: 'fuel',
         css: cdn + theme + 'css/modules/fuel' + ext + '?v=' + version()
     }).
-    when('/visors', {
-        templateUrl: cdn + theme + 'html/modules/visors.module.html?v=' + version(),
-        controller: 'visors',
-        css: cdn + theme + 'css/modules/visors' + ext + '?v=' + version()
-    }).
     when('/init/:instId1/:instId2', {
         redirectTo: function(params) {
 			app.initialInstanceUri = atou(params.instId1 + '/' +  params.instId2);
@@ -619,7 +615,7 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 
 	var fixSI = function(si) {
 		if (!si || !si.uri) return null;
-		if (si.uri.indexOf('?access_token=')) {
+		if (si.uri.indexOf('?access_token=') > 0) {
 			var parts = si.uri.split('?access_token=');
 			si.uri = parts[0];
 			si.accessToken = parts[1];
@@ -627,15 +623,19 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 		return si;
 	}
 
-	var setInstance = function(inst) {
-		var initial = (!instance);
-		if (!instance || (instance.id != inst.id)) instance = inst;
+	var setSI = function(inst) {
 		//preserve the token, unless a new one is given
-		var si = store[instance.id];
+		var si = store[inst.id];
 		if (!si) si = {};
 		si.token = inst.token ? inst.token : si.token;
 		si.uri = inst.uri ? inst.uri.replace(':443', '') : si.uri;
-		store[instance.id] = fixSI(si);
+		store[inst.id] = fixSI(si);
+	}
+
+	var setInstance = function(inst) {
+		var initial = (!instance);
+		if (!instance || (instance.id != inst.id)) instance = inst;
+		setSI(inst);
 		delete(instance.token);
 		delete(instance.uri);
 		if (inst.contacts) {
@@ -648,6 +648,7 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 			instance.devices = inst.devices;
 			initial = true;
 		}
+		instance.deviceVersion = inst.deviceVersion;
 		instance.devices = instance.devices ? instance.devices : (instances[instance.id] && instances[instance.id].devices ? instances[instance.id].devices : []);
 		if (!!instance.pistons) {
 			for (i = 0; i < inst.pistons.length; i++) {
@@ -679,10 +680,18 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 		writeObject('instances', instances);
 		writeObject('store', store);
 		writeObject('instance', instance.id, _dk);
-		if ((instance.coreVersion) && (version() != instance.coreVersion) && !nagged) {
+		var coreVersionComparison = compareVersions(version(), instance.coreVersion);
+		if ((instance.coreVersion) && coreVersionComparison !== 0 && !nagged) {
 			nagged = true;
-			if (version() > instance.coreVersion) {
-				status('A newer SmartApp version (' + version() + ') is available, please update and publish all the webCoRE SmartApps in the SmartThings IDE.', true);
+			if (compareVersions(minCoreVersion, instance.coreVersion) > 0) {
+				status('A newer SmartApp version (' + version() + ') is available.<br><strong>Please update and publish all the webCoRE SmartApps in the SmartThings IDE.</strong>', true);
+			} else if (coreVersionComparison > 0) {
+				localforage.getItem('lastOptionalVersion').then(function(lastOptionalVersion) {
+					if (lastOptionalVersion !== version()) {
+						status('A newer SmartApp version (' + version() + ') is available.<br>This is an <strong>optional</strong> update; consider updating the webCoRE SmartApps in the SmartThings IDE.', true);
+						localforage.setItem('lastOptionalVersion', version());
+					}
+				});
 			} else {
 				status('A newer UI version (' + instance.coreVersion + ') is available, please hard reload this web page to get the newest version.', true);
 			}
@@ -878,7 +887,7 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 		if (!si || !si.token) {
 			if ((app.initialInstanceUri && app.initialInstanceUri.length) || (uri && uri.length)) {
 				uri = app.initialInstanceUri ? app.initialInstanceUri : uri;
-				if (!uri.startsWith('https://')) {
+				if (!/^(https?:\/\/)/.test(uri)) {
 					if (uri && (uri.indexOf('tat.comapi') > 0)) {
 						var parts = uri.split('api');
 						if (parts[1].length >= 33) {
@@ -931,17 +940,50 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 				if (data.location) {
 					setLocation(data.location);
 				}
-				if (data.instance) {
-					data.instance = setInstance(data.instance);
-				}
 				data.endpoint = si.uri;
 				data.accessToken = si.accessToken;
+				if (data.instance && !data.instance.devices && data.instance.deviceVersion !== deviceVersion) {
+					setSI(data.instance);
+					return dataService.getDevices(data.instance).then(function(devices) {
+						data.instance.devices = devices;
+						return data;
+					});
+				}
 				return data;	
 			}, function(error) {
 				status('There was a problem loading the dashboard data. The data shown below may be outdated; please log out if this problem persists.');
 				return error;
+			}).then(function(data) {
+				if (data.instance) {
+					data.instance = setInstance(data.instance);
+				}
+				return data;
 			});
     };
+
+	dataService.getDevices = function(inst, offset, devices) {
+		var si = inst ? store[inst.id] : null;
+		offset = offset || 0;
+		devices = devices || {};
+		return $http.jsonp(
+			(si ? si.uri : 'about:blank/') + 'intf/dashboard/devices?' + getAccessToken(si) + 'token=' + (si && si.token ? si.token : '') + '&offset=' + offset, 
+			{jsonpCallbackParam: 'callback'}
+		).then(function(response) {
+			var data = response.data;
+			if (data.error) {
+				status('There was a problem loading your devices. Please log out and try again.');
+				return null;
+			}
+			Object.assign(devices, data.devices);
+			if (!data.complete) {
+				return dataService.getDevices(inst, data.nextOffset, devices);
+			}
+			return devices;
+		}, function(error) {
+			status('There was a problem loading your devices. The data shown below may be outdated; please refresh the page to try again.');
+			return null;
+		});
+	}
 
     dataService.tap = function (tapId) {
         return $http({
@@ -970,7 +1012,7 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 			});
     }
 
-    dataService.getPiston = function (pistonId) {
+    dataService.getPiston = function (pistonId, shouldSetInstance) {
 		var inst = dataService.getPistonInstance(pistonId);
 		if (!inst) { inst = dataService.getInstance() };
 		si = store && inst ? store[inst.id] : null;
@@ -978,11 +1020,27 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
         var dbVersion = readObject('db.version', _dk);
 		status('Loading piston...');
     	return $http.jsonp((si ? si.uri : 'about:blank/') + 'intf/dashboard/piston/get?' + getAccessToken(si) + 'id=' + pistonId + '&db=' + dbVersion + '&token=' + (si && si.token ? si.token : '') + '&dev=' + deviceVersion, {jsonpCallbackParam: 'callback'})
+			// Base response is no longer included with the piston
+			.then(function(response) {
+				var data = response.data;
+				if (shouldSetInstance) {
+					if (data.location) {
+						setLocation(data.location);
+					}
+					data.endpoint = si.uri;
+					if (data.instance) {
+						data.instance = setInstance(data.instance);
+					} else {
+						return dataService.loadInstance(inst).then(function(instData) {
+							const mergedData = Object.assign({}, data, instData);
+							return Object.assign({}, response, { data: mergedData });
+						});
+					}
+				}
+				return response;
+			})
 			.then(function(response) {
 				data = response.data;
-				if (data.now) {
-					adjustTimeOffset(data.now);
-				}
 				if (data.dbVersion) {
 					writeObject('db.version', data.dbVersion, _dk);
 					writeObject('db', data.db);
@@ -991,13 +1049,6 @@ config.factory('dataService', ['$http', '$location', '$rootScope', '$window', '$
 					data.db = readObject('db');
 					status();
 				}
-				if (data.location) {
-					setLocation(data.location);
-				}
-				if (data.instance) {
-					data.instance = setInstance(data.instance);
-				}
-				data.endpoint = si.uri;
 				return data;
 			}, function(error) {
 				return null;
@@ -1769,17 +1820,17 @@ function fixTime(timestamp) {
 	return timestamp;
 }
 
-function utcToString(timestamp) {
+var utcToString = nanomemoize(function utcToString(timestamp) {
 	return (new Date(fixTime(timestamp))).toLocaleString();
-}
+});
 
-function utcToTimeString(timestamp) {
+var utcToTimeString = nanomemoize(function utcToTimeString(timestamp) {
 	return (new Date(fixTime(timestamp))).toLocaleTimeString();
-}
+});
 
-function utcToDateString(timestamp) {
+var utcToDateString = nanomemoize(function utcToDateString(timestamp) {
 	return (new Date(fixTime(timestamp))).toLocaleDateString();
-}
+});
 
 function timeSince(time){
 	if (!time) return "never";
@@ -1872,7 +1923,10 @@ function adjustTimeOffset(time) {
 
 
 
-function renderString($sce, value) {
+app.filter('renderString', ['$sce', function($sce) { 
+	return renderString.bind(null, $sce);
+}]);
+var renderString = nanomemoize(function renderString($sce, value) {
         var i = 0;
         if (!value) return '';
 		var meta = {type: null, options: {}};
@@ -2014,7 +2068,7 @@ function renderString($sce, value) {
         var result = $sce.trustAsHtml(meta.html);
 		result.meta = meta;
 		return result;
-    };
+    });
 
 var wuIconForTwcCode = {
 	0:  'tstorms',          // Tornado
@@ -2180,6 +2234,35 @@ function atou(str) {
     return decodeURIComponent(escape(window.atob(str)));
 }
 
+// Split version parts for numeric and lexical comparison (e.g. v0.9.1ff < v0.10.1ff)
+function comparableVersion(version) {
+	var parts = version.split('.');
+	return [
+		// Numeric major version, without v prefix
+		+parts[0].substr(1),
+		// Numeric minor version
+		+parts[1],
+		// Hex build number remains a string
+		parts[2],
+	];
+}
+
+// Compare webCoRE version number format for sorting from oldest to newest
+function compareVersions(a, b) {
+	var aParts = comparableVersion(a);
+	var bParts = comparableVersion(b);
+
+	for (var i = 0; i < aParts.length; i++) {
+		if (aParts[i] < bParts[i]) {
+			return -1;
+		}
+		if (aParts[i] > bParts[i]) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 //document.documentElement.addEventListener('touchstart', function (event) {
 //    if (event.touches.length > 1) {
 //        event.preventDefault();
@@ -2203,13 +2286,11 @@ if (document.selection) {
 
 function loadFontAwesomeFallback() {
   fontAwesomePro = false;
-  $('head script[src*="pro.fontawesome"]').each(function() {
-    $(this).remove().clone()
-      .attr({
-        src: this.src.replace('pro', 'use'),
-      }).removeAttr('onerror')
-      .appendTo('head');
-  });
+  var shim = $('head script[src*="pro.fontawesome"]').remove().clone().removeAttr('onerror');
+  var faFreeSrc = shim.attr('src').replace('pro', 'use');
+  shim.attr('src', faFreeSrc);
+  shim.clone().attr('src', faFreeSrc.replace('v4-shims', 'all')).appendTo('head');
+  shim.appendTo('head');
 }
 
 // Handle Pro load failure before app loads
@@ -2269,4 +2350,6 @@ if (!String.prototype.endsWith) {
 	};
 }
 
-version = function() { return 'v0.3.10e.20190628'; };
+// Minimum version to display as an optional upgrade
+minCoreVersion = 'v0.3.110.20191009';
+version = function() { return 'v0.3.113.20210203'; };
